@@ -286,13 +286,11 @@ def partial_close_tp1(trade_id: int, close_qty: float, close_price: float, fee_s
             "UPDATE paper_portfolio SET quantity = ?, stop_loss = ?, tp1_hit = 1, realized_pnl_usd = ? WHERE id = ?",
             (new_quantity, trade["entry_price"], new_realized, trade_id),
         )
-        balance_row = conn.execute("SELECT value FROM system_config WHERE key = 'virtual_balance_usd'").fetchone()
-        current_balance = float(balance_row["value"]) if balance_row else 10000.0
-        new_balance = current_balance + partial_pnl
+        # Single atomic read-modify-write so balance correctness never depends on the caller
+        # remembering to wrap this in BEGIN IMMEDIATE.
         conn.execute(
-            """INSERT INTO system_config (key, value, updated_at) VALUES ('virtual_balance_usd', ?, ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
-            (str(new_balance), now),
+            "UPDATE system_config SET value = CAST(value AS REAL) + ?, updated_at = ? WHERE key = 'virtual_balance_usd'",
+            (partial_pnl, now),
         )
         updated_row = conn.execute("SELECT * FROM paper_portfolio WHERE id = ?", (trade_id,)).fetchone()
     return {**dict(updated_row), "partial_pnl_usd": partial_pnl}
@@ -324,13 +322,11 @@ def close_paper_trade(trade_id: int, close_price: float, status: str, fee_slippa
                WHERE id = ?""",
             (status, close_price, pnl_pct, total_pnl_usd, now, trade_id),
         )
-        balance_row = conn.execute("SELECT value FROM system_config WHERE key = 'virtual_balance_usd'").fetchone()
-        current_balance = float(balance_row["value"]) if balance_row else 10000.0
-        new_balance = current_balance + remaining_pnl
+        # Single atomic read-modify-write so balance correctness never depends on the caller
+        # remembering to wrap this in BEGIN IMMEDIATE.
         conn.execute(
-            """INSERT INTO system_config (key, value, updated_at) VALUES ('virtual_balance_usd', ?, ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
-            (str(new_balance), now),
+            "UPDATE system_config SET value = CAST(value AS REAL) + ?, updated_at = ? WHERE key = 'virtual_balance_usd'",
+            (remaining_pnl, now),
         )
     return {**trade, "status": status, "close_price": close_price, "pnl_pct": pnl_pct, "pnl_usd": total_pnl_usd}
 
