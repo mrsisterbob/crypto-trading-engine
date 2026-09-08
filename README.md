@@ -1,8 +1,8 @@
 # crypto-trading-engine
 
 <!-- AUTO-STATS:START -->
-![Lines of source](https://img.shields.io/badge/source-2637_lines-c9a24b)
-![Tests](https://img.shields.io/badge/tests-0-4a8a5c)
+![Lines of source](https://img.shields.io/badge/source-2874_lines-c9a24b)
+![Tests](https://img.shields.io/badge/tests-15-4a8a5c)
 <!-- AUTO-STATS:END -->
 
 Crypto Alert & Paper-Trading Engine: scans BTC/ETH + tracked altcoins on a 15-minute cycle for
