@@ -6,6 +6,7 @@ Outbound calls reuse analytics_engine's exponential backoff decorator for 429/5x
 import html
 import logging
 import os
+import time
 
 import requests
 
@@ -195,6 +196,38 @@ def format_circuit_breaker_status_card(status: dict) -> str:
         f"<b>Manual Halt:</b> {'Yes' if status['manual_halt'] else 'No'}",
     ]
     return "\n".join(lines)
+
+
+def format_price_fetch_failure_alert(symbol: str, error: str) -> str:
+    sym = html.escape(str(symbol))
+    lines = [
+        "⚠️ <b>PRICE FEED FAILURE - OPEN POSITION UNMONITORED</b>",
+        "",
+        f"<b>Symbol:</b> <code>{sym}</code>",
+        f"<b>Error:</b> {html.escape(str(error))}",
+        "",
+        "This symbol has an OPEN paper trade whose stop-loss / take-profit could not be checked "
+        "this cycle. If it keeps failing, the position may run unmonitored - review manually.",
+    ]
+    return "\n".join(lines)
+
+
+# Throttle repeat price-feed-failure alerts per symbol so a persistently dead feed (or a
+# tick-storm in the WS reconciler) can't spam Telegram every cycle/second.
+_PRICE_FAILURE_ALERT_THROTTLE_S = 900
+_price_failure_alert_times: dict[str, float] = {}
+
+
+def dispatch_price_fetch_failure(symbol: str, error: str) -> None:
+    """Alert (once per throttle window per symbol) that a price fetch failed for a symbol that
+    has an OPEN position. Callers must only invoke this for open-position symbols - a failure for
+    a symbol with no open trade is not actionable and would just be noise."""
+    now = time.time()
+    last = _price_failure_alert_times.get(symbol, 0.0)
+    if now - last < _PRICE_FAILURE_ALERT_THROTTLE_S:
+        return
+    _price_failure_alert_times[symbol] = now
+    send_telegram_message(format_price_fetch_failure_alert(symbol, error))
 
 
 def dispatch_signal_alert(signal: dict) -> bool:

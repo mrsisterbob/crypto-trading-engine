@@ -31,6 +31,7 @@ SIGNAL_DEDUP_WINDOW_MINUTES = 60
 PAPER_BUY_RE = re.compile(r"^/paper_buy\s+([A-Za-z0-9]{2,20})(?:\s+(\d+(?:\.\d+)?)\s*%?)?\s*$", re.IGNORECASE)
 
 database.init_db()
+analytics_engine.verify_market_data_reachable()  # fail fast on HTTP 451 / unreachable market-data host
 
 
 # ==============================================================================

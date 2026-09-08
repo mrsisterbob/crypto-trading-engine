@@ -68,6 +68,8 @@ def _on_message(ws, message: str) -> None:
     for trade in open_trades:
         price = relevant_prices.get(trade["symbol"])
         if price is None:
+            # Normal: !miniTicker@arr only carries symbols that traded in the last ~1s. The
+            # 5-min REST loop in main_2.py is the backstop for a genuinely stalled feed.
             continue
         try:
             event = analytics_engine.reconcile_trade_tick(trade, price)
@@ -76,6 +78,9 @@ def _on_message(ws, message: str) -> None:
             alert_dispatcher.dispatch_reconcile_event(event)
         except Exception as e:
             logging.error(f"ws_reconciler: failed to reconcile trade #{trade.get('id')} ({trade['symbol']}) @ {price}: {e}")
+            # Reconciliation blew up for a symbol with an OPEN position - its SL/TP was not
+            # evaluated on this tick. Surface it (throttled) instead of only logging.
+            alert_dispatcher.dispatch_price_fetch_failure(trade["symbol"], f"reconcile failed @ {price}: {e}")
 
 
 def _on_error(ws, error) -> None:

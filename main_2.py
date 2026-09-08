@@ -62,6 +62,7 @@ CONFIG_NUMERIC_BOUNDS = {
 CONFIG_MUTATION_RE = re.compile(r"^([A-Za-z_]+)\s*([=+\-])\s*(.+)$")
 
 database.init_db()
+analytics_engine.verify_market_data_reachable()  # fail fast on HTTP 451 / unreachable market-data host
 
 
 def _resolve_config_key(raw_key: str) -> str | None:
@@ -162,6 +163,9 @@ def reconcile_paper_trades_job() -> None:
                     prices[symbol] = analytics_engine.fetch_current_price(symbol)
                 except Exception as e:
                     logging.error(f"reconcile_paper_trades_job: price fetch failed for {symbol}: {e}")
+                    # This symbol has an OPEN position and just went unmonitored for a full cycle.
+                    # Surface it - a silent skip leaves the position unwatched for up to 15 min.
+                    alert_dispatcher.dispatch_price_fetch_failure(symbol, str(e))
             for trade in open_trades:
                 price = prices.get(trade["symbol"])
                 if price is None:
