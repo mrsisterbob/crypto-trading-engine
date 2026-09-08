@@ -18,7 +18,9 @@ import time
 
 import requests
 
-BINANCE_SPOT_BASE = "https://api.binance.com"
+# Binance.US spot endpoint: api.binance.com returns HTTP 451 (geo-blocked) from a US IP.
+# Binance.US mirrors the /api/v3/klines schema used here. Majors (BTCUSDT/ETHUSDT) only.
+BINANCE_SPOT_BASE = "https://api.binance.us"
 
 DONCHIAN_PERIOD = 20
 ATR_PERIOD = 14

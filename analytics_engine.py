@@ -43,8 +43,19 @@ PIN_CLUSTER_PENALTY = 10
 
 DERIBIT_BASE_URL = "https://www.deribit.com/api/v2"
 BINANCE_FAPI_BASE = "https://fapi.binance.com"
-BINANCE_SPOT_BASE = "https://api.binance.com"
+# Spot klines/ticker are fetched from Binance.US: api.binance.com returns HTTP 451 (geo-blocked)
+# from a US IP. Binance.US mirrors the /api/v3 spot endpoints but has NO futures API, which is
+# why the funding-rate / open-interest (alt "squeeze context") path below stays on
+# fapi.binance.com and is gated OFF by default (see alt_scanning_enabled()).
+BINANCE_SPOT_BASE = "https://api.binance.us"
 COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
+
+# Logged once per scan cycle when alt scanning is disabled, in place of the funding/OI calls.
+ALT_CONTEXT_UNAVAILABLE_MSG = (
+    "alt context unavailable from this region: funding-rate / open-interest data requires "
+    "fapi.binance.com (HTTP 451 from a US IP) and has no drop-in replacement - alt scanning "
+    "skipped. Set system_config.enable_alt_scanning=1 from a supported region to restore it."
+)
 
 _DERIBIT_INSTRUMENT_RE = re.compile(r"^[A-Z]+-(\d{1,2}[A-Z]{3}\d{2})-(\d+(?:\.\d+)?)-([CP])$")
 
@@ -67,8 +78,21 @@ def get_tracked_alts() -> list[str]:
     return list(ALT_SYMBOLS)
 
 
+def alt_scanning_enabled() -> bool:
+    """Alt-coin scanning is OFF by default. The funding-rate and open-interest calls it depends
+    on hit fapi.binance.com, which is geo-blocked (HTTP 451) from a US IP with no drop-in
+    replacement. Flip system_config.enable_alt_scanning to '1' only from a region / data source
+    where the futures API is actually reachable; the alt logic is left fully intact for that day.
+    """
+    raw = str(database.get_config("enable_alt_scanning", "0")).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def get_supported_pairs() -> set[str]:
-    """Dynamic counterpart to SUPPORTED_PAIRS, reflecting the live tracked_alts watchlist."""
+    """Dynamic counterpart to SUPPORTED_PAIRS, reflecting the live tracked_alts watchlist.
+    Collapses to majors-only while alt scanning is disabled (the engine's current scope)."""
+    if not alt_scanning_enabled():
+        return {f"{s}USDT" for s in MAJOR_SYMBOLS}
     return {f"{s}USDT" for s in MAJOR_SYMBOLS + get_tracked_alts()}
 
 
@@ -269,6 +293,34 @@ def fetch_klines(symbol: str, interval: str = "4h", limit: int = 100) -> list[di
 
 def fetch_current_price(symbol: str) -> float:
     return float(_get(f"{BINANCE_SPOT_BASE}/api/v3/ticker/price", params={"symbol": symbol}).json()["price"])
+
+
+def verify_market_data_reachable() -> None:
+    """Startup fail-fast check for the configured spot market-data host. Raises RuntimeError with
+    a clear, actionable message if the endpoint returns HTTP 451 (geo-blocked) or is unreachable -
+    the HTTP 451 condition previously only surfaced as a buried log line while every scan silently
+    fetched nothing. Called once at process start (main_2.py / main.py) before any scheduler job.
+    """
+    url = f"{BINANCE_SPOT_BASE}/api/v3/ping"
+    try:
+        resp = requests.get(url, timeout=10)
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            f"Market-data host {BINANCE_SPOT_BASE} is unreachable ({exc}). The engine cannot "
+            "fetch prices - aborting startup."
+        ) from exc
+    if resp.status_code == 451:
+        raise RuntimeError(
+            f"Market-data host {BINANCE_SPOT_BASE} returned HTTP 451 (geo-blocked from this IP). "
+            "Repoint BINANCE_SPOT_BASE at a reachable spot endpoint (e.g. https://api.binance.us) "
+            "before starting the engine."
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Market-data host {BINANCE_SPOT_BASE} health check failed: HTTP {resp.status_code}. "
+            "Aborting startup rather than running blind."
+        )
+    logging.info(f"Market-data host {BINANCE_SPOT_BASE} reachable (HTTP 200).")
 
 
 # ---------------------------------------------------------------------------
@@ -520,10 +572,12 @@ def reconcile_trade_tick(trade: dict, price: float) -> dict | None:
 
 
 def scan_all_symbols() -> list[dict]:
-    """Runs one full scan cycle across BTC/ETH (gamma context) and the 7 tracked altcoins
-    (OI/funding context), gated by a single BTC.D volatility check computed once per cycle.
-    Never raises - a failure on any individual symbol is caught and represented as an error
-    entry so one bad API call can't take down the whole cycle."""
+    """Runs one full scan cycle across BTC/ETH (gamma context) and, when alt scanning is enabled,
+    the tracked altcoins (OI/funding context), gated by a single BTC.D volatility check computed
+    once per cycle. Alt scanning is OFF by default (funding/OI data is geo-blocked here) - when
+    disabled the alt path is skipped entirely with one clear log line, not run against dead
+    endpoints. Never raises - a failure on any individual symbol is caught and represented as an
+    error entry so one bad API call can't take down the whole cycle."""
     try:
         dominance_pct = fetch_btc_dominance()
         database.insert_market_tick(symbol="BTC.D", timeframe="dominance_snapshot", close=dominance_pct)
@@ -534,13 +588,19 @@ def scan_all_symbols() -> list[dict]:
     if dominance_check.get("volatile"):
         logging.warning(f"BTC.D volatility halt ACTIVE: {dominance_check}")
 
-    try:
-        funding_intervals = fetch_funding_intervals()
-    except Exception as e:
-        logging.error(f"fetch_funding_intervals failed, defaulting all alts to 8h: {e}")
+    alts_on = alt_scanning_enabled()
+    if alts_on:
+        tracked_alts = get_tracked_alts()
+        try:
+            funding_intervals = fetch_funding_intervals()
+        except Exception as e:
+            logging.error(f"fetch_funding_intervals failed, defaulting all alts to 8h: {e}")
+            funding_intervals = {}
+    else:
+        tracked_alts = []
         funding_intervals = {}
+        logging.info(ALT_CONTEXT_UNAVAILABLE_MSG)
 
-    tracked_alts = get_tracked_alts()
     results = []
     with ThreadPoolExecutor(max_workers=len(MAJOR_SYMBOLS) + len(tracked_alts)) as executor:
         futures = {}
