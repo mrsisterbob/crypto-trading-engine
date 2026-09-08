@@ -1,7 +1,7 @@
 # crypto-trading-engine
 
 <!-- AUTO-STATS:START -->
-![Lines of source](https://img.shields.io/badge/source-2874_lines-c9a24b)
+![Lines of source](https://img.shields.io/badge/source-2880_lines-c9a24b)
 ![Tests](https://img.shields.io/badge/tests-15-4a8a5c)
 <!-- AUTO-STATS:END -->
 
@@ -40,6 +40,9 @@ backtest_analysis.py    Validation layer on top of backtest.py: walk-forward tes
                         (the number that actually decides if a strategy is worth trading), and
                         Monte Carlo drawdown resampling (worst-plausible-case sizing, not just
                         the one historical trade ordering).
+funding_logger.py       Read-only cross-venue perpetual funding-rate logger + spread reporter.
+                        Measurement instrument only - no strategy, no orders, no API keys.
+                        See "Cross-venue funding logger" below.
 circuit_breaker.py      Live drawdown kill switch: halts new signal alerts and paper-trade
                         entries once realized drawdown from peak balance crosses a threshold you
                         set - does not close already-open positions, which keep running their
@@ -61,6 +64,53 @@ Look at the walk-forward consistency, the expectancy-per-trade (not just win rat
 Monte Carlo drawdown percentiles before trusting the strategy at any position size. A single
 backtest run on one historical window is the most common way a retail-built strategy fools its
 own builder - this module exists specifically to catch that.
+
+## Cross-venue funding logger
+
+`funding_logger.py` **logs data. That is all it does.** It records the perpetual funding rate
+for BTC and ETH on every venue that serves it publicly from this machine, every 8 hours, and
+reports the distribution of the spread between venues.
+
+**There is no funding-arbitrage strategy in this repo, and this is not one.** It places no
+orders, holds no API keys, and reads only public unauthenticated endpoints. It exists to
+gather evidence for a single question that cannot be answered by guessing:
+
+> Is the funding spread between venues, at retail size, after fees, actually harvestable?
+
+Read the output as a spread distribution, not as a return. The tool deliberately does not
+print a projected APY or an expected profit - that inference is yours to make, and it has to
+survive everything the logger does **not** measure:
+
+- **Harvesting a spread means holding two simultaneous positions on two different venues** -
+  long the venue paying you, short the venue charging you. None of that is built here.
+- That requires **collateral split across both venues**, actively managed, plus the transfer
+  latency and cost of moving margin between them when one leg moves against you.
+- The short leg carries **liquidation risk**. A funding spread of 0.02%/day is wiped out many
+  times over by one liquidation, and the spread being wide is often *itself* the signal that
+  one side is stressed.
+- Execution slippage at your actual size, maker/taker fees on four legs (open and close, both
+  venues), and the plain fact that a spread visible in a snapshot is not necessarily a spread
+  you could have filled.
+
+**30 days of observations is a starting sample, not proof of anything.** At an 8-hour cadence
+that is roughly 90 data points per venue - enough to see whether a spread persists or is
+noise, not enough to establish an edge. The report prints the batch count and flags small
+samples for exactly this reason.
+
+Venue coverage is determined by what is reachable without authentication from wherever you run
+it, which is a geography question, not a code question - run the reachability check and see.
+Notably: `api.binance.com` returns HTTP 451 from a US IP, `api.binance.us` is spot-only with no
+funding endpoint at all, and Bybit's public endpoints return HTTP 403 from a US IP. No
+workaround is attempted for any of those, by design.
+
+```
+python funding_logger.py collect                    # one collection cycle
+python funding_logger.py report                     # spread distribution so far
+python funding_logger.py report --symbol BTC --thresholds 0.05,0.10,0.20
+```
+
+Once `main_2.py` is running, the collection job runs itself every 8 hours. It is strictly
+additive - if it fails it logs and returns, and the scan and reconciliation jobs are unaffected.
 
 ## Setup
 

@@ -23,6 +23,7 @@ import database
 import analytics_engine
 import alert_dispatcher
 import circuit_breaker
+import funding_logger
 import ws_reconciler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -185,6 +186,11 @@ def reconcile_paper_trades_job() -> None:
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(scan_cycle_job, "interval", minutes=15, id="market_scan", max_instances=1, coalesce=True, misfire_grace_time=120)
 scheduler.add_job(reconcile_paper_trades_job, "interval", minutes=5, id="reconcile_paper_trades", max_instances=1, coalesce=True, misfire_grace_time=60)
+# Read-only cross-venue funding-rate logger (funding_logger.py). Purely additive
+# instrumentation on an 8h cadence to match typical funding epochs: it places no trades, reads
+# only public endpoints, and log_funding_job() swallows its own exceptions so it can never
+# disturb the scan or reconciliation jobs sharing this scheduler.
+scheduler.add_job(funding_logger.log_funding_job, "interval", hours=8, id="funding_observations", max_instances=1, coalesce=True, misfire_grace_time=600)
 scheduler.start()
 ws_reconciler.start_ws_reconciler()
 
